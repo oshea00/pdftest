@@ -1,10 +1,12 @@
 """Extract text from PDF pages at different DPIs using OpenAI Vision API, comparing against PDF baseline."""
 
 import base64
-import difflib
 import json
+import re
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import click
 import fitz  # PyMuPDF
@@ -217,37 +219,135 @@ def remove_blank_lines(text: str) -> str:
     return '\n'.join(non_blank_lines)
 
 
-def generate_diff(reference_text: str, compare_text: str, reference_label: str, compare_label: str) -> str:
+def normalize_text(text: str) -> str:
     """
-    Generate a unified diff between two text strings.
+    Normalize text for n-gram comparison.
+
+    - Converts to lowercase
+    - Collapses all whitespace (spaces, tabs, newlines) to single spaces
+    - Removes leading/trailing whitespace
+    - Preserves punctuation and special characters
 
     Args:
-        reference_text: The reference text (highest DPI)
-        compare_text: The text to compare against reference
-        reference_label: Label for reference file
-        compare_label: Label for comparison file
+        text: Input text
 
     Returns:
-        Unified diff as a string
+        Normalized text
     """
-    reference_lines = reference_text.splitlines(keepends=True)
-    compare_lines = compare_text.splitlines(keepends=True)
+    # Convert to lowercase
+    text = text.lower()
+    # Collapse all whitespace to single spaces
+    text = re.sub(r'\s+', ' ', text)
+    # Strip leading/trailing whitespace
+    text = text.strip()
+    return text
 
-    # Ensure lines end with newline for proper diff formatting
-    if reference_lines and not reference_lines[-1].endswith('\n'):
-        reference_lines[-1] += '\n'
-    if compare_lines and not compare_lines[-1].endswith('\n'):
-        compare_lines[-1] += '\n'
 
-    diff = difflib.unified_diff(
-        compare_lines,
-        reference_lines,
-        fromfile=compare_label,
-        tofile=reference_label,
-        lineterm=''
-    )
+def get_character_ngrams(text: str, n: int) -> Counter:
+    """
+    Extract character n-grams from text.
 
-    return ''.join(diff)
+    Args:
+        text: Input text (should be normalized)
+        n: Size of n-grams
+
+    Returns:
+        Counter of n-gram frequencies
+    """
+    if len(text) < n:
+        return Counter()
+    ngrams = [text[i:i+n] for i in range(len(text) - n + 1)]
+    return Counter(ngrams)
+
+
+@dataclass
+class NgramScores:
+    """Container for n-gram similarity scores."""
+    precision: float
+    recall: float
+    f1: float
+    n: int
+
+
+def compute_ngram_f1(reference: str, candidate: str, n: int = 4) -> NgramScores:
+    """
+    Compute character n-gram precision, recall, and F1 score.
+
+    Args:
+        reference: Reference text (ground truth)
+        candidate: Candidate text to evaluate
+        n: Size of n-grams (default: 4)
+
+    Returns:
+        NgramScores with precision, recall, and F1
+    """
+    # Normalize both texts
+    ref_normalized = normalize_text(reference)
+    cand_normalized = normalize_text(candidate)
+
+    # Get n-gram counts
+    ref_ngrams = get_character_ngrams(ref_normalized, n)
+    cand_ngrams = get_character_ngrams(cand_normalized, n)
+
+    # Handle edge cases
+    if not ref_ngrams and not cand_ngrams:
+        return NgramScores(precision=1.0, recall=1.0, f1=1.0, n=n)
+    if not cand_ngrams:
+        return NgramScores(precision=0.0, recall=0.0, f1=0.0, n=n)
+    if not ref_ngrams:
+        return NgramScores(precision=0.0, recall=0.0, f1=0.0, n=n)
+
+    # Compute overlap (intersection with minimum counts)
+    overlap = sum((ref_ngrams & cand_ngrams).values())
+
+    # Compute precision and recall
+    precision = overlap / sum(cand_ngrams.values())
+    recall = overlap / sum(ref_ngrams.values())
+
+    # Compute F1
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * (precision * recall) / (precision + recall)
+
+    return NgramScores(precision=precision, recall=recall, f1=f1, n=n)
+
+
+def compute_multi_ngram_scores(reference: str, candidate: str, n_values: List[int] = [3, 4, 5]) -> Dict[int, NgramScores]:
+    """
+    Compute n-gram scores for multiple n values.
+
+    Args:
+        reference: Reference text (ground truth)
+        candidate: Candidate text to evaluate
+        n_values: List of n-gram sizes to compute (default: [3, 4, 5])
+
+    Returns:
+        Dictionary mapping n to NgramScores
+    """
+    return {n: compute_ngram_f1(reference, candidate, n) for n in n_values}
+
+
+def get_quality_label(f1_score: float) -> str:
+    """
+    Get a quality label based on F1 score.
+
+    Args:
+        f1_score: The F1 score (0.0 to 1.0)
+
+    Returns:
+        Quality label string
+    """
+    if f1_score >= 0.99:
+        return "Perfect"
+    elif f1_score >= 0.95:
+        return "Excellent"
+    elif f1_score >= 0.90:
+        return "Good"
+    elif f1_score >= 0.80:
+        return "Fair"
+    else:
+        return "Poor"
 
 
 @click.command()
@@ -345,29 +445,70 @@ def main(pdf_file, page_number, dpis, api_key, model, images_dir):
         except Exception as e:
             click.echo(f"Error extracting text from {image_path.name}: {e}", err=True)
 
-    # Generate diff comparisons against PDF baseline
+    # Compute n-gram similarity scores against PDF baseline
     if extracted_texts:
         reference_text = pdf_text
-        reference_label = "pdf_page_pdf.txt"
 
-        click.echo(f"\nComparing all image extractions against PDF baseline...\n")
+        click.echo(f"\nComputing n-gram similarity scores against PDF baseline...\n")
+        click.echo(f"{'DPI':<8} {'n=3 F1':<10} {'n=4 F1':<10} {'n=5 F1':<10} {'Avg F1':<10} {'Quality':<10}")
+        click.echo("-" * 58)
+
+        all_scores = []
 
         for dpi in sorted(extracted_texts.keys()):
             compare_text = extracted_texts[dpi]
-            compare_label = f"{pdf_name}_page{page_number}_{dpi}dpi.txt"
 
-            diff_output = generate_diff(reference_text, compare_text, reference_label, compare_label)
+            # Compute n-gram scores for n=3, 4, 5
+            scores = compute_multi_ngram_scores(reference_text, compare_text, [3, 4, 5])
 
-            # Save diff file
-            diff_filename = f"{pdf_name}_page{page_number}_diff_{dpi}dpi.txt"
-            with open(diff_filename, 'w', encoding='utf-8') as f:
-                if diff_output:
-                    f.write(diff_output)
-                else:
-                    f.write("No differences found.\n")
+            # Calculate average F1 across n values
+            avg_f1 = sum(s.f1 for s in scores.values()) / len(scores)
 
-            diff_lines = len([l for l in diff_output.splitlines() if l.startswith('+') or l.startswith('-')]) if diff_output else 0
-            click.echo(f"Saved diff to {diff_filename} ({diff_lines} changed lines)")
+            # Get quality label
+            quality = get_quality_label(avg_f1)
+
+            # Display scores
+            click.echo(f"{dpi:<8} {scores[3].f1:<10.4f} {scores[4].f1:<10.4f} {scores[5].f1:<10.4f} {avg_f1:<10.4f} {quality:<10}")
+
+            all_scores.append({
+                'dpi': dpi,
+                'scores': scores,
+                'avg_f1': avg_f1,
+                'quality': quality
+            })
+
+        # Save detailed scores to file
+        scores_filename = f"{pdf_name}_page{page_number}_scores.txt"
+        with open(scores_filename, 'w', encoding='utf-8') as f:
+            f.write(f"N-Gram Similarity Scores\n")
+            f.write(f"========================\n")
+            f.write(f"PDF: {pdf_file}\n")
+            f.write(f"Page: {page_number}\n")
+            f.write(f"Model: {model}\n")
+            f.write(f"Reference: PDF baseline (pdf_page_pdf.txt)\n\n")
+
+            f.write(f"{'DPI':<8} {'n=3 F1':<10} {'n=4 F1':<10} {'n=5 F1':<10} {'Avg F1':<10} {'Quality':<10}\n")
+            f.write("-" * 58 + "\n")
+
+            for entry in all_scores:
+                dpi = entry['dpi']
+                scores = entry['scores']
+                avg_f1 = entry['avg_f1']
+                quality = entry['quality']
+                f.write(f"{dpi:<8} {scores[3].f1:<10.4f} {scores[4].f1:<10.4f} {scores[5].f1:<10.4f} {avg_f1:<10.4f} {quality:<10}\n")
+
+            f.write("\n\nDetailed Scores\n")
+            f.write("===============\n\n")
+
+            for entry in all_scores:
+                dpi = entry['dpi']
+                scores = entry['scores']
+                f.write(f"DPI: {dpi}\n")
+                for n, s in sorted(scores.items()):
+                    f.write(f"  n={n}: Precision={s.precision:.4f}, Recall={s.recall:.4f}, F1={s.f1:.4f}\n")
+                f.write("\n")
+
+        click.echo(f"\nSaved detailed scores to {scores_filename}")
 
     click.echo("\nDone!")
 

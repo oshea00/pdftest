@@ -10,8 +10,9 @@ Test OpenAI's GPT vision models' ability to extract text from PDF pages at diffe
 - Rasterize the page at multiple DPIs (default: 25, 50, 100, 150, 300, 600)
 - Save PNG images to an `images/` subdirectory
 - Use OpenAI's Vision API to extract text from each image
-- Save extracted text to individual `.txt` files for comparison
-- Auto-generate unified diff files comparing each DPI image extraction against the PDF baseline
+- **Structured output**: Uses JSON schema to separate page title/header from body content, saving only the body text for consistent comparisons
+- Remove blank lines from extracted text for cleaner comparisons
+- **N-gram F1 scoring**: Layout-agnostic similarity metric robust to line wrapping and formatting differences
 
 ## Installation
 
@@ -56,7 +57,8 @@ This will:
 4. Create PNG images at 25, 50, 100, 150, 300, and 600 DPI in the `images/` folder
 5. Send each image to OpenAI's Vision API for text extraction
 6. Save results to `AplExamples_page0_25dpi.txt`, `AplExamples_page0_50dpi.txt`, etc.
-7. Generate diff files comparing each DPI image extraction to the PDF baseline
+7. Compute n-gram F1 similarity scores comparing each extraction to the PDF baseline
+8. Save detailed scores to `AplExamples_page0_scores.txt`
 
 ### Options
 
@@ -94,7 +96,7 @@ Generated files:
 - `pdf_page_pdf.txt` - Text extracted from the PDF baseline (used for comparison)
 - `images/{pdf_name}_page{num}_{dpi}dpi.png` - Rasterized images at various DPIs
 - `{pdf_name}_page{num}_{dpi}dpi.txt` - Extracted text for each DPI image
-- `{pdf_name}_page{num}_diff_{dpi}dpi.txt` - Unified diff comparing each DPI image to the PDF baseline
+- `{pdf_name}_page{num}_scores.txt` - N-gram F1 similarity scores for all DPI extractions
 
 ## Approach & Reasoning
 
@@ -119,6 +121,52 @@ This tool uses a **PDF-based baseline** for comparison rather than comparing aga
    - Identify the minimum DPI threshold where image-based extraction becomes acceptable
    - Understand the trade-offs between image quality (DPI) and extraction accuracy
 
+### Structured Output for Consistent Comparisons
+
+OpenAI's API often prepends a page title or header to extracted text. To ensure consistent comparisons between PDF and image extractions, this tool uses **structured output** with a JSON schema that separates:
+
+- **title**: The page title or header (discarded)
+- **body**: The main text content (saved for comparison)
+
+This approach ensures that both PDF and image extractions return only the body text, making comparisons meaningful and avoiding false positives from inconsistent title handling.
+
+### N-Gram F1 Scoring
+
+Traditional diff-based comparisons are sensitive to line breaks and formatting differences, which can produce noisy results when comparing OCR outputs. This tool uses **character n-gram F1 scoring**, a layout-agnostic metric widely used in OCR and speech recognition evaluation.
+
+#### How It Works
+
+1. **Text Normalization**: Both reference and candidate texts are normalized:
+   - Convert to lowercase
+   - Collapse all whitespace (spaces, tabs, newlines) to single spaces
+   - Remove leading/trailing whitespace
+
+2. **N-Gram Extraction**: Character n-grams (substrings of length n) are extracted from both texts. For example, "hello" with n=3 produces: `["hel", "ell", "llo"]`
+
+3. **Precision/Recall/F1 Computation**:
+   - **Precision**: What fraction of candidate n-grams appear in the reference?
+   - **Recall**: What fraction of reference n-grams appear in the candidate?
+   - **F1**: Harmonic mean of precision and recall
+
+4. **Multiple N Values**: Scores are computed for n=3, 4, and 5, plus an average F1 across all three.
+
+#### Why N-Gram F1 is Superior for OCR Evaluation
+
+- **Robust to line wrapping**: Different line breaks don't affect scores
+- **Smooths over small shifts**: Minor character position changes have limited impact
+- **Captures local accuracy**: Character-level n-grams detect substitutions, insertions, and deletions
+- **Widely validated**: Standard metric in OCR benchmarks and competitions
+
+#### Interpreting Scores
+
+| F1 Score | Quality Level |
+|----------|---------------|
+| 0.99+    | Perfect - virtually identical extraction |
+| 0.95-0.99| Excellent - near-perfect extraction |
+| 0.90-0.95| Good - minor errors |
+| 0.80-0.90| Fair - some noticeable errors |
+| < 0.80   | Poor - significant text loss or errors |
+
 #### Use Cases
 
 This approach is particularly valuable for:
@@ -136,10 +184,18 @@ pdf-extract report.pdf 2
 # Review the PDF baseline text
 cat pdf_page_pdf.txt
 
-# Review the auto-generated diff files to see how each DPI image extraction compares to the PDF baseline
-cat report_page2_diff_25dpi.txt
-cat report_page2_diff_100dpi.txt
-cat report_page2_diff_300dpi.txt
+# Review the n-gram F1 scores to see extraction quality at each DPI
+cat report_page2_scores.txt
+
+# Example output:
+# DPI      n=3 F1     n=4 F1     n=5 F1     Avg F1     Quality
+# ----------------------------------------------------------
+# 25       0.8234     0.7891     0.7543     0.7889     Poor
+# 50       0.9012     0.8876     0.8721     0.8870     Fair
+# 100      0.9534     0.9456     0.9378     0.9456     Excellent
+# 150      0.9712     0.9654     0.9598     0.9655     Excellent
+# 300      0.9834     0.9789     0.9745     0.9789     Excellent
+# 600      0.9901     0.9876     0.9851     0.9876     Perfect
 
 # Compare file sizes to understand cost trade-offs
 ls -lh images/report_page2_*.png
