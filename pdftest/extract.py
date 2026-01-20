@@ -2,12 +2,38 @@
 
 import base64
 import difflib
+import json
 from pathlib import Path
 from typing import Dict, List
 
 import click
 import fitz  # PyMuPDF
 from openai import OpenAI
+
+
+# JSON schema for structured text extraction
+EXTRACTION_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "text_extraction",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "The page title or header, if present"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "The main text content of the page"
+                }
+            },
+            "required": ["title", "body"],
+            "additionalProperties": False
+        }
+    }
+}
 
 
 def extract_page_as_images(pdf_path: str, page_num: int, dpis: List[int], output_dir: Path) -> List[tuple]:
@@ -103,14 +129,14 @@ def extract_text_with_openai(image_path: Path, api_key: str, model: str = "gpt-4
         model: OpenAI model to use (default: gpt-4o)
 
     Returns:
-        Extracted text
+        Extracted text (body only, excluding title)
     """
     client = OpenAI(api_key=api_key)
 
     # Encode image to base64
     base64_image = encode_image_to_base64(image_path)
 
-    # Create chat completion with vision
+    # Create chat completion with vision and structured output
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -119,7 +145,7 @@ def extract_text_with_openai(image_path: Path, api_key: str, model: str = "gpt-4
                 "content": [
                     {
                         "type": "text",
-                        "text": "Please extract all text from this image. Return only the text content, preserving the layout and structure as much as possible. Do not add any commentary, delimiters or special characters to the the extracted content of your own."
+                        "text": "Please extract all text from this image. Return only the text content, preserving the layout and structure as much as possible. Do not add any commentary, delimiters or special characters to the extracted content of your own. Separate the page title/header from the main body content."
                     },
                     {
                         "type": "image_url",
@@ -129,10 +155,13 @@ def extract_text_with_openai(image_path: Path, api_key: str, model: str = "gpt-4
                     }
                 ]
             }
-        ]
+        ],
+        response_format=EXTRACTION_SCHEMA
     )
 
-    return response.choices[0].message.content
+    # Parse JSON response and return body text
+    result = json.loads(response.choices[0].message.content)
+    return result["body"]
 
 
 def extract_text_from_pdf_with_openai(pdf_path: Path, api_key: str, model: str = "gpt-4o") -> str:
@@ -145,14 +174,14 @@ def extract_text_from_pdf_with_openai(pdf_path: Path, api_key: str, model: str =
         model: OpenAI model to use (default: gpt-4o)
 
     Returns:
-        Extracted text
+        Extracted text (body only, excluding title)
     """
     client = OpenAI(api_key=api_key)
 
     # Encode PDF to base64
     base64_pdf = encode_pdf_to_base64(pdf_path)
 
-    # Create chat completion with PDF
+    # Create chat completion with PDF using file type and structured output
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -160,21 +189,25 @@ def extract_text_from_pdf_with_openai(pdf_path: Path, api_key: str, model: str =
                 "role": "user",
                 "content": [
                     {
-                        "type": "text",
-                        "text": "Please extract all text from this PDF. Return only the text content, preserving the layout and structure as much as possible. Do not add any commentary, delimiters or special characters to the the extracted content of your own."
+                        "type": "file",
+                        "file": {
+                            "filename": pdf_path.name,
+                            "file_data": f"data:application/pdf;base64,{base64_pdf}",
+                        }
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:application/pdf;base64,{base64_pdf}"
-                        }
+                        "type": "text",
+                        "text": "Please extract all text from this PDF. Return only the text content, preserving the layout and structure as much as possible. Do not add any commentary, delimiters or special characters to the extracted content of your own. Separate the page title/header from the main body content."
                     }
                 ]
             }
-        ]
+        ],
+        response_format=EXTRACTION_SCHEMA
     )
 
-    return response.choices[0].message.content
+    # Parse JSON response and return body text
+    result = json.loads(response.choices[0].message.content)
+    return result["body"]
 
 
 def remove_blank_lines(text: str) -> str:
