@@ -1,4 +1,4 @@
-"""Extract text from PDF pages at different DPIs using OpenAI Vision API."""
+"""Extract text from PDF pages at different DPIs using OpenAI Vision API, comparing against PDF baseline."""
 
 import base64
 import difflib
@@ -54,10 +54,43 @@ def extract_page_as_images(pdf_path: str, page_num: int, dpis: List[int], output
     return image_paths
 
 
+def extract_page_as_pdf(pdf_path: str, page_num: int, output_path: Path) -> Path:
+    """
+    Extract a single page from PDF and save as a new PDF file.
+
+    Args:
+        pdf_path: Path to the PDF file
+        page_num: Page number to extract (0-indexed)
+        output_path: Path to save the extracted page PDF
+
+    Returns:
+        Path to the saved PDF file
+    """
+    doc = fitz.open(pdf_path)
+
+    if page_num >= len(doc):
+        raise ValueError(f"Page {page_num} does not exist. PDF has {len(doc)} pages (0-indexed).")
+
+    # Create a new PDF with just the requested page
+    new_doc = fitz.open()
+    new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+    new_doc.save(str(output_path))
+    new_doc.close()
+    doc.close()
+
+    return output_path
+
+
 def encode_image_to_base64(image_path: Path) -> str:
     """Encode image file to base64 string."""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
+
+
+def encode_pdf_to_base64(pdf_path: Path) -> str:
+    """Encode PDF file to base64 string."""
+    with open(pdf_path, "rb") as pdf_file:
+        return base64.b64encode(pdf_file.read()).decode("utf-8")
 
 
 def extract_text_with_openai(image_path: Path, api_key: str, model: str = "gpt-4o") -> str:
@@ -92,6 +125,48 @@ def extract_text_with_openai(image_path: Path, api_key: str, model: str = "gpt-4
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+
+    return response.choices[0].message.content
+
+
+def extract_text_from_pdf_with_openai(pdf_path: Path, api_key: str, model: str = "gpt-4o") -> str:
+    """
+    Extract text from PDF using OpenAI API.
+
+    Args:
+        pdf_path: Path to the PDF file
+        api_key: OpenAI API key
+        model: OpenAI model to use (default: gpt-4o)
+
+    Returns:
+        Extracted text
+    """
+    client = OpenAI(api_key=api_key)
+
+    # Encode PDF to base64
+    base64_pdf = encode_pdf_to_base64(pdf_path)
+
+    # Create chat completion with PDF
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Please extract all text from this PDF. Return only the text content, preserving the layout and structure as much as possible. Do not add any commentary, delimiters or special characters to the the extracted content of your own."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:application/pdf;base64,{base64_pdf}"
                         }
                     }
                 ]
@@ -153,6 +228,9 @@ def main(pdf_file, page_number, dpis, api_key, model, images_dir):
     """
     Extract text from a PDF page at different DPIs using OpenAI Vision API.
 
+    Creates a PDF baseline by extracting the page as a PDF and comparing
+    all image-based extractions against this baseline.
+
     PDF_FILE: Path to the PDF file
     PAGE_NUMBER: Page number to extract (0-indexed)
 
@@ -183,7 +261,32 @@ def main(pdf_file, page_number, dpis, api_key, model, images_dir):
         click.echo(f"Error extracting page: {e}", err=True)
         raise click.Abort()
 
-    click.echo(f"\nExtracting text using OpenAI {model}...\n")
+    # Extract page as PDF and get baseline text
+    click.echo(f"\nCreating PDF baseline...\n")
+    pdf_page_path = Path("pdf_page.pdf")
+
+    try:
+        extract_page_as_pdf(pdf_file, page_number, pdf_page_path)
+        click.echo(f"Saved page {page_number} to {pdf_page_path}")
+
+        # Extract text from the PDF page
+        click.echo(f"Extracting text from PDF using OpenAI {model}...")
+        pdf_text = extract_text_from_pdf_with_openai(pdf_page_path, api_key, model)
+        pdf_text = remove_blank_lines(pdf_text)
+
+        # Save PDF-extracted text as baseline
+        pdf_text_filename = "pdf_page_pdf.txt"
+        with open(pdf_text_filename, 'w', encoding='utf-8') as f:
+            f.write(pdf_text)
+
+        click.echo(f"Saved PDF baseline text to {pdf_text_filename}")
+        click.echo(f"Preview: {pdf_text[:100]}...\n")
+
+    except Exception as e:
+        click.echo(f"Error creating PDF baseline: {e}", err=True)
+        raise click.Abort()
+
+    click.echo(f"\nExtracting text from images using OpenAI {model}...\n")
 
     # Extract text from each image and store results
     pdf_name = Path(pdf_file).stem
@@ -209,18 +312,14 @@ def main(pdf_file, page_number, dpis, api_key, model, images_dir):
         except Exception as e:
             click.echo(f"Error extracting text from {image_path.name}: {e}", err=True)
 
-    # Generate diff comparisons against highest DPI
-    if len(extracted_texts) > 1:
-        highest_dpi = max(extracted_texts.keys())
-        reference_text = extracted_texts[highest_dpi]
-        reference_label = f"{pdf_name}_page{page_number}_{highest_dpi}dpi.txt"
+    # Generate diff comparisons against PDF baseline
+    if extracted_texts:
+        reference_text = pdf_text
+        reference_label = "pdf_page_pdf.txt"
 
-        click.echo(f"\nComparing all extractions against {highest_dpi} DPI reference...\n")
+        click.echo(f"\nComparing all image extractions against PDF baseline...\n")
 
         for dpi in sorted(extracted_texts.keys()):
-            if dpi == highest_dpi:
-                continue
-
             compare_text = extracted_texts[dpi]
             compare_label = f"{pdf_name}_page{page_number}_{dpi}dpi.txt"
 
