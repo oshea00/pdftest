@@ -1,0 +1,15 @@
+[project]
+name = "pdftest"
+version = "0.1.0"
+description = "Test GPT vision text extraction from PDF pages at different DPIs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf>=1.23.0",
+    "openai>=1.0.0",
+    "click>=8.0.0",
+    "pillow>=10.0.0",
+]
+
+[project.scripts]
+pdf-extract = "pdftest.extract:main"
