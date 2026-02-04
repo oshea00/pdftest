@@ -19,3 +19,4 @@ images/
 .env
 .env.local
 .python-version
+GenAIMaster.*
