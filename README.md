@@ -14,29 +14,45 @@ Test OpenAI's GPT vision models' ability to extract text from PDF pages at diffe
 - Remove blank lines from extracted text for cleaner comparisons
 - **N-gram F1 scoring**: Layout-agnostic similarity metric robust to line wrapping and formatting differences
 
-## Installation
+## Run Locally
 
-1. Install dependencies using uv:
+### Prereqs
+
+- Python 3.11+
+- OpenAI API key
+
+### Setup With uv (Recommended)
+
+1. Create the virtual environment and install dependencies:
 ```bash
 uv sync
 ```
 
-Or using pip:
+2. (Optional) Activate the venv if you want to run commands directly:
 ```bash
+source .venv/bin/activate
+```
+
+3. Run the CLI:
+```bash
+uv run pdf-extract AplExamples.pdf 0
+```
+
+### Setup With pip
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
-## Setup
+## API Key
 
 Set your OpenAI API key as an environment variable:
 ```bash
 export OPENAI_API_KEY='your-api-key-here'
 ```
-
-Or create a `.env` file with:
-```
-OPENAI_API_KEY=your-api-key-here
-```
+The CLI reads `OPENAI_API_KEY` directly. If you prefer `.env` files, load them with your shell tooling (for example, `direnv`) before running the command.
 
 ## Usage
 
